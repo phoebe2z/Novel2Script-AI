@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 
 from converter import convert_novel_to_script
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+load_dotenv(override=True)
 
 
 @asynccontextmanager

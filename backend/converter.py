@@ -2,8 +2,10 @@
 
 import os
 import re
+from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import ValidationError
 
@@ -14,9 +16,12 @@ MAX_RETRIES = 2
 
 
 def _get_client() -> OpenAI:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("未设置 OPENAI_API_KEY 环境变量")
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key or api_key == "sk-your-api-key-here":
+        raise ValueError(
+            "未设置 OPENAI_API_KEY：请在项目根目录 .env 文件中填入真实密钥，然后重启后端"
+        )
     base_url = os.getenv("OPENAI_BASE_URL")
     return OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
 
