@@ -31,14 +31,37 @@ cp .env.example .env
 
 ```bash
 cd backend
-python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
 ```
+
+若 `.venv` 尚不存在，先创建（已存在则跳过）：
+
+```bash
+py -3 -m venv .venv
+```
+
+**Git Bash（MINGW64）**
+
+```bash
+source .venv/Scripts/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8001
+```
+
+**PowerShell**
+
+```powershell
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8001
+```
+
+不激活虚拟环境也可直接运行：
+
+```bash
+.venv/Scripts/python.exe -m uvicorn main:app --reload --port 8001
+```
+
+> 若 8000 端口已被占用，请使用 8001，并在 `.env` 中设置 `NEXT_PUBLIC_API_URL=http://localhost:8001`。
 
 ### 3. 启动前端
 
