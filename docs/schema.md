@@ -1,60 +1,67 @@
-# 剧本 YAML Schema 设计说明
+# 剧本 YAML Schema 设计说明（v2）
 
 ## Schema 结构预览
 
 ```yaml
 metadata:
-  title: "小说标题"
-  version: "1.0"
-script_content:
-  - scene_id: 1
-    location: "室内/室外 - 地点 - 时间"
-    action: "描述场景中的动作和环境。"
+  title: "三体"
+  author: "刘慈欣"
+  version: "2.0"
+  created_at: "2026-06-05"
+scenes:
+  - id: 1
+    slug: "INT. 汪淼家 - 日"
+    action: "门开。四名来访者站在门口——两名警察与两名陆军军官。便衣史强低头点烟，不抬眼。"
     dialogues:
-      - character: "角色名"
-        line: "台词内容"
-        notes: "表演指导（可选）"
+      - character: "史强"
+        emotion: "粗鲁"
+        text: "汪淼？"
+    notes: "特写：史强手中的烟头。"
 ```
+
+## 相比 v1 的改进
+
+| 维度 | v1 | v2 |
+|------|----|----|
+| 场景标头 | `location: 室内 - 地点 - 时间` | `slug: INT. 书房 - 日`（行业标准） |
+| 台词字段 | `line` + `notes` | `text` + `emotion`（情感与台词分离） |
+| 场景备注 | 无 | `notes`（拍摄/转场，与表演指导分层） |
+| 元数据 | title, version | + author, created_at |
 
 ## 设计说明
 
-### 场景化（Scene-based）
+### slug（场景标头）
 
-将剧本拆解为列表对象，便于后续通过程序直接转换为电影分镜头表格。每个 `scene_id` 对应一个可独立拍摄的单元。
+采用 `INT.`（内景）/ `EXT.`（外景）+ 地点 + 时间的格式，与专业剧本一致，便于直接导入分镜/拍摄计划工具。
 
-### 层级清晰
+### emotion（情感标签）
 
-将 `metadata` 与 `script_content` 分离，方便后期版本管理。`metadata.version` 可用于追踪 Schema 演进。
+从台词中提炼说话时的情感状态，便于演员把握语气，也与 `action` 中的肢体描写形成互补。
 
-### 数据解耦
+### notes（场景级）
 
-将 `character` 与 `line` 分开，使得 AI 可以轻松提取出所有角色列表，便于统计角色的出场频率。
+用于拍摄提示、转场说明（如「切至」「闪回开始」「淡出」），与单句台词的表演细节区分开。
 
-### YAML 优势
+### scenes
 
-相比 JSON，YAML 对人类可读性更友好，作者在 Markdown 编辑器中微调剧本时不容易出错（缩进直观）。
+顶层键由 `script_content` 改为 `scenes`，语义更直观。
 
 ## 字段说明
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `metadata.title` | string | 是 | 剧本/小说标题 |
-| `metadata.version` | string | 是 | Schema 版本，默认 `1.0` |
-| `script_content[].scene_id` | int | 是 | 场景序号，从 1 递增 |
-| `script_content[].location` | string | 是 | 格式：`室内/室外 - 地点 - 时间` |
-| `script_content[].action` | string | 是 | 镜头可记录的动作与环境 |
-| `script_content[].dialogues[].character` | string | 是 | 说话角色名 |
-| `script_content[].dialogues[].line` | string | 是 | 台词正文 |
-| `script_content[].dialogues[].notes` | string | 否 | 表演指导、语气、动作提示 |
+| `metadata.title` | string | 是 | 剧本标题 |
+| `metadata.author` | string | 否 | 作者，默认「佚名」 |
+| `metadata.version` | string | 是 | Schema 版本，当前 `2.0` |
+| `metadata.created_at` | date | 否 | 创建日期 ISO 格式 |
+| `scenes[].id` | int | 是 | 场景序号 |
+| `scenes[].slug` | string | 是 | 如 `INT. 书房 - 日` |
+| `scenes[].action` | string | 是 | 镜头可记录的动作与环境 |
+| `scenes[].dialogues[].character` | string | 是 | 角色名 |
+| `scenes[].dialogues[].emotion` | string | 否 | 情感标签 |
+| `scenes[].dialogues[].text` | string | 是 | 台词正文 |
+| `scenes[].notes` | string | 否 | 拍摄/转场提示 |
 
 ## Pydantic 模型
 
-后端使用 `backend/schema.py` 中的 Pydantic 模型校验 AI 输出，确保生成的 YAML 符合 Schema 要求。
-
-## System Prompt 基调
-
-程序内置 System Prompt 要求 AI：
-
-1. 严格遵守 Schema 格式输出纯 YAML
-2. 将文学描述转为镜头语言（action 只写能被镜头记录的画面）
-3. 保持对话完整，并根据上下文补全表演说明
+见 `backend/schema.py`。

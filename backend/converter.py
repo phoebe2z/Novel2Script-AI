@@ -65,7 +65,7 @@ def _extract_dialogue_lines(text: str) -> list[str]:
 
 
 def _count_script_dialogues(script: Script) -> int:
-    return sum(len(scene.dialogues) for scene in script.script_content)
+    return sum(len(scene.dialogues) for scene in script.scenes)
 
 
 def _split_long_text(text: str, max_chars: int) -> list[str]:
@@ -98,8 +98,8 @@ def _dialogue_coverage(expected: list[str], script: Script) -> float:
         return 1.0
 
     script_lines = [
-        _normalize_line(d.line)
-        for scene in script.script_content
+        _normalize_line(d.text)
+        for scene in script.scenes
         for d in scene.dialogues
     ]
 
@@ -127,7 +127,7 @@ def _build_scene_prompt(
 ) -> str:
     parts = [
         f"【场景 {segment.index}：{segment.hint}】",
-        f"【本场第 {part_index}/{part_total} 部分，同一场戏请保持 location 一致】",
+        f"【本场第 {part_index}/{part_total} 部分，同一场戏请保持 slug 一致】",
     ]
 
     if title_hint and segment.index == 1 and part_index == 1:
@@ -250,11 +250,11 @@ def _merge_part_scripts(scripts: list[Script]) -> Script:
     title = scripts[0].metadata.title
     scenes: list[Scene] = []
     for script in scripts:
-        scenes.extend(script.script_content)
+        scenes.extend(script.scenes)
 
     return Script(
-        metadata=Metadata(title=title, version="1.0"),
-        script_content=scenes,
+        metadata=Metadata(title=title, version="2.0"),
+        scenes=scenes,
     )
 
 
@@ -263,11 +263,11 @@ def _merge_all_scenes(scene_scripts: list[Script], title: str) -> Script:
     scene_id = 1
 
     for script in scene_scripts:
-        for scene in script.script_content:
-            merged_scenes.append(scene.model_copy(update={"scene_id": scene_id}))
+        for scene in script.scenes:
+            merged_scenes.append(scene.model_copy(update={"id": scene_id}))
             scene_id += 1
 
-    return Script(metadata=Metadata(title=title, version="1.0"), script_content=merged_scenes)
+    return Script(metadata=Metadata(title=title, version="2.0"), scenes=merged_scenes)
 
 
 def _resolve_title(scene_scripts: list[Script], title_hint: str | None) -> str:

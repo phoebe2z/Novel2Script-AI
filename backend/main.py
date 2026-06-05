@@ -68,14 +68,14 @@ async def convert(request: ConvertRequest):
 
     characters = {
         d.character
-        for scene in script.script_content
+        for scene in script.scenes
         for d in scene.dialogues
     }
 
     return ConvertResponse(
         yaml=yaml_str,
         metadata=script.metadata.model_dump(),
-        scene_count=len(script.script_content),
+        scene_count=len(script.scenes),
         character_count=len(characters),
         source_scenes=source_scenes,
     )
