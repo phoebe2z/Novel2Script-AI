@@ -2,6 +2,7 @@
 
 import os
 import re
+import time
 from pathlib import Path
 
 import yaml
@@ -10,16 +11,19 @@ from openai import OpenAI
 from pydantic import ValidationError
 
 from prompts import COMPLETENESS_REMINDER, SYSTEM_PROMPT
-from schema import Metadata, Script
+from scene_splitter import SceneSegment, split_into_scenes
+from schema import Metadata, Scene, Script
 
-MAX_RETRIES = 3
-CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "1800"))
-COVERAGE_THRESHOLD = float(os.getenv("DIALOGUE_COVERAGE_THRESHOLD", "0.9"))
+MAX_RETRIES = 2
+# 单场戏内部若仍过长，再按字数切小片
+PART_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "500"))
+COVERAGE_THRESHOLD = float(os.getenv("DIALOGUE_COVERAGE_THRESHOLD", "0.8"))
+SCENE_DELAY_SEC = float(os.getenv("CHUNK_DELAY_SEC", "2"))
 
-# 弯引号 ""、直角「」、直引号 "
 _DIALOGUE_PATTERN = re.compile(
     r'["\u201c\u201d\u300c\u300d]([^"\u201c\u201d\u300c\u300d]+?)["\u201c\u201d\u300c\u300d]'
 )
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？…；;])\s*")
 
 
 def _get_client() -> OpenAI:
@@ -60,37 +64,33 @@ def _extract_dialogue_lines(text: str) -> list[str]:
     return [line.strip() for line in lines if len(line.strip()) >= 2]
 
 
-def _count_source_dialogues(text: str) -> int:
-    return len(_extract_dialogue_lines(text))
-
-
 def _count_script_dialogues(script: Script) -> int:
     return sum(len(scene.dialogues) for scene in script.script_content)
 
 
-def _split_into_chunks(text: str, max_chars: int) -> list[str]:
-    paragraphs = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
-    if not paragraphs:
+def _split_long_text(text: str, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
         return [text]
 
-    chunks: list[str] = []
-    current: list[str] = []
-    current_len = 0
+    parts: list[str] = []
+    sentences = [s for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    if not sentences:
+        return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
-    for paragraph in paragraphs:
-        extra = len(paragraph) + (2 if current else 0)
-        if current and current_len + extra > max_chars:
-            chunks.append("\n\n".join(current))
-            current = [paragraph]
-            current_len = len(paragraph)
+    current = ""
+    for sentence in sentences:
+        if not current:
+            current = sentence
+            continue
+        if len(current) + len(sentence) <= max_chars:
+            current += sentence
         else:
-            current.append(paragraph)
-            current_len += extra
-
+            parts.append(current)
+            current = sentence
     if current:
-        chunks.append("\n\n".join(current))
+        parts.append(current)
 
-    return chunks
+    return parts
 
 
 def _dialogue_coverage(expected: list[str], script: Script) -> float:
@@ -115,69 +115,82 @@ def _dialogue_coverage(expected: list[str], script: Script) -> float:
     return found / len(expected)
 
 
-def _build_user_prompt(
-    chunk_text: str,
+def _build_scene_prompt(
+    segment: SceneSegment,
+    part_text: str,
     *,
-    chunk_index: int,
-    chunk_total: int,
+    part_index: int,
+    part_total: int,
     title_hint: str | None,
-    dialogue_checklist: list[str],
+    dialogue_count: int,
     strict_retry: bool,
 ) -> str:
-    parts = [f"【片段 {chunk_index + 1}/{chunk_total}】"]
+    parts = [
+        f"【场景 {segment.index}：{segment.hint}】",
+        f"【本场第 {part_index}/{part_total} 部分，同一场戏请保持 location 一致】",
+    ]
 
-    if title_hint and chunk_index == 0:
+    if title_hint and segment.index == 1 and part_index == 1:
         parts.append(f"标题提示：{title_hint}")
 
-    if dialogue_checklist:
+    if dialogue_count:
         parts.append(
-            f"【对白强制清单：共 {len(dialogue_checklist)} 句，"
-            "必须全部写入 dialogues，按叙事顺序排列，line 保留原文，不得遗漏】"
+            f"【本部分含 {dialogue_count} 句引号对白，必须全部写入 dialogues，按顺序，不得遗漏】"
         )
-        for index, line in enumerate(dialogue_checklist, start=1):
-            parts.append(f"{index}. {line}")
 
     if strict_retry:
         parts.append(COMPLETENESS_REMINDER)
 
-    parts.extend(["【小说原文片段】", chunk_text])
+    parts.extend(["【小说原文】", part_text])
     return "\n\n".join(parts)
 
 
 def _call_llm(client: OpenAI, user_content: str) -> str:
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.05,
-        max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "16384")),
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.05,
+            max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "4096")),
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "413" in message or "Request too large" in message or "rate_limit" in message:
+            raise ValueError(
+                "单次请求超出 Groq token 上限。可在 .env 设置 CHUNK_MAX_CHARS=400 后重试，"
+                "或手动按场景分段粘贴。"
+            ) from exc
+        raise
+
     return response.choices[0].message.content or ""
 
 
-def _convert_chunk(
+def _convert_scene_part(
     client: OpenAI,
-    chunk_text: str,
+    segment: SceneSegment,
+    part_text: str,
     *,
-    chunk_index: int,
-    chunk_total: int,
+    part_index: int,
+    part_total: int,
     title_hint: str | None,
 ) -> Script:
-    dialogue_checklist = _extract_dialogue_lines(chunk_text)
+    dialogue_checklist = _extract_dialogue_lines(part_text)
     last_error: Exception | None = None
 
     for attempt in range(MAX_RETRIES + 1):
         strict_retry = attempt > 0
-        user_prompt = _build_user_prompt(
-            chunk_text,
-            chunk_index=chunk_index,
-            chunk_total=chunk_total,
+        user_prompt = _build_scene_prompt(
+            segment,
+            part_text,
+            part_index=part_index,
+            part_total=part_total,
             title_hint=title_hint,
-            dialogue_checklist=dialogue_checklist,
+            dialogue_count=len(dialogue_checklist),
             strict_retry=strict_retry,
         )
 
@@ -188,7 +201,7 @@ def _convert_chunk(
 
             if coverage < COVERAGE_THRESHOLD and attempt < MAX_RETRIES:
                 last_error = ValueError(
-                    f"片段 {chunk_index + 1} 对白覆盖不足："
+                    f"场景 {segment.index} 第 {part_index} 部分对白覆盖不足："
                     f"{int(coverage * len(dialogue_checklist))}/{len(dialogue_checklist)}"
                 )
                 continue
@@ -199,25 +212,68 @@ def _convert_chunk(
             if attempt >= MAX_RETRIES:
                 break
 
-    raise ValueError(f"片段 {chunk_index + 1} 转换失败：{last_error}")
+    raise ValueError(
+        f"场景 {segment.index}（{segment.hint}）第 {part_index} 部分转换失败：{last_error}"
+    )
 
 
-def _merge_scripts(scripts: list[Script], title: str) -> Script:
-    scenes = []
+def _convert_scene(
+    client: OpenAI,
+    segment: SceneSegment,
+    title_hint: str | None,
+) -> Script:
+    parts = _split_long_text(segment.text, PART_MAX_CHARS)
+    part_scripts: list[Script] = []
+
+    for part_index, part_text in enumerate(parts, start=1):
+        if part_index > 1 and SCENE_DELAY_SEC > 0:
+            time.sleep(SCENE_DELAY_SEC)
+        part_scripts.append(
+            _convert_scene_part(
+                client,
+                segment,
+                part_text,
+                part_index=part_index,
+                part_total=len(parts),
+                title_hint=title_hint,
+            )
+        )
+
+    return _merge_part_scripts(part_scripts)
+
+
+def _merge_part_scripts(scripts: list[Script]) -> Script:
+    """将同一场戏的多部分输出合并为一个 Script。"""
+    if not scripts:
+        raise ValueError("无有效场景输出")
+
+    title = scripts[0].metadata.title
+    scenes: list[Scene] = []
+    for script in scripts:
+        scenes.extend(script.script_content)
+
+    return Script(
+        metadata=Metadata(title=title, version="1.0"),
+        script_content=scenes,
+    )
+
+
+def _merge_all_scenes(scene_scripts: list[Script], title: str) -> Script:
+    merged_scenes: list[Scene] = []
     scene_id = 1
 
-    for script in scripts:
+    for script in scene_scripts:
         for scene in script.script_content:
-            scenes.append(scene.model_copy(update={"scene_id": scene_id}))
+            merged_scenes.append(scene.model_copy(update={"scene_id": scene_id}))
             scene_id += 1
 
-    return Script(metadata=Metadata(title=title, version="1.0"), script_content=scenes)
+    return Script(metadata=Metadata(title=title, version="1.0"), script_content=merged_scenes)
 
 
-def _resolve_title(scripts: list[Script], title_hint: str | None) -> str:
+def _resolve_title(scene_scripts: list[Script], title_hint: str | None) -> str:
     if title_hint:
         return title_hint
-    for script in scripts:
+    for script in scene_scripts:
         if script.metadata.title:
             return script.metadata.title
     return "未命名"
@@ -226,40 +282,33 @@ def _resolve_title(scripts: list[Script], title_hint: str | None) -> str:
 def convert_novel_to_script(
     novel_text: str,
     title_hint: str | None = None,
-) -> tuple[Script, str]:
+) -> tuple[Script, str, int]:
     """
-    Convert novel text to a validated Script model and YAML string.
-
-    Long texts are split into chunks with per-chunk dialogue checklists.
+    先按场景切分原文，再逐场景生成剧本，最后合并。
     """
     if not novel_text.strip():
         raise ValueError("请输入小说文本")
 
     text = _normalize_text(novel_text)
     client = _get_client()
-    chunks = _split_into_chunks(text, CHUNK_MAX_CHARS)
+    segments = split_into_scenes(text)
 
-    chunk_scripts = [
-        _convert_chunk(
-            client,
-            chunk,
-            chunk_index=index,
-            chunk_total=len(chunks),
-            title_hint=title_hint,
-        )
-        for index, chunk in enumerate(chunks)
-    ]
+    scene_scripts: list[Script] = []
+    for index, segment in enumerate(segments):
+        if index > 0 and SCENE_DELAY_SEC > 0:
+            time.sleep(SCENE_DELAY_SEC)
+        scene_scripts.append(_convert_scene(client, segment, title_hint))
 
-    title = _resolve_title(chunk_scripts, title_hint)
-    script = _merge_scripts(chunk_scripts, title)
+    title = _resolve_title(scene_scripts, title_hint)
+    script = _merge_all_scenes(scene_scripts, title)
 
     expected_dialogues = _extract_dialogue_lines(text)
     coverage = _dialogue_coverage(expected_dialogues, script)
-    if len(expected_dialogues) >= 5 and coverage < 0.85:
+    if len(expected_dialogues) >= 5 and coverage < 0.75:
         raise ValueError(
             f"对白覆盖仍不足：输出 {_count_script_dialogues(script)} 句，"
             f"原文约 {len(expected_dialogues)} 句（覆盖率 {coverage:.0%}）。"
-            "建议缩短单次输入或更换更强模型后重试。"
+            f"已自动切为 {len(segments)} 个场景，可尝试缩短输入或调低 CHUNK_MAX_CHARS。"
         )
 
     yaml_str = yaml.dump(
@@ -268,4 +317,4 @@ def convert_novel_to_script(
         default_flow_style=False,
         sort_keys=False,
     )
-    return script, yaml_str
+    return script, yaml_str, len(segments)

@@ -46,6 +46,7 @@ class ConvertResponse(BaseModel):
     metadata: dict
     scene_count: int
     character_count: int
+    source_scenes: int
 
 
 @app.get("/health")
@@ -56,7 +57,7 @@ async def health():
 @app.post("/api/convert", response_model=ConvertResponse)
 async def convert(request: ConvertRequest):
     try:
-        script, yaml_str = convert_novel_to_script(
+        script, yaml_str, source_scenes = convert_novel_to_script(
             request.novel_text,
             request.title_hint,
         )
@@ -76,4 +77,5 @@ async def convert(request: ConvertRequest):
         metadata=script.metadata.model_dump(),
         scene_count=len(script.script_content),
         character_count=len(characters),
+        source_scenes=source_scenes,
     )

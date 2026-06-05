@@ -100,6 +100,7 @@ export default function Home() {
               <div style={styles.stats}>
                 <span>标题：{result.metadata.title}</span>
                 <span>场景：{result.scene_count}</span>
+                <span>自动切分：{result.source_scenes} 场</span>
                 <span>角色：{result.character_count}</span>
               </div>
               <pre style={styles.yamlPreview}>{result.yaml}</pre>
