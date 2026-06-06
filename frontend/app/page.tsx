@@ -1,14 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { convertNovel, type ConvertResponse } from "@/lib/api";
 
+function extractTitleFromYaml(yaml: string, fallback: string) {
+  const match = yaml.match(/^\s*title:\s*["']?([^"'\n]+)["']?\s*$/m);
+  return match?.[1]?.trim() || fallback;
+}
+
 function downloadYaml(yaml: string, title: string) {
+  const filename = extractTitleFromYaml(yaml, title);
   const blob = new Blob([yaml], { type: "text/yaml;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${title || "script"}.yaml`;
+  a.download = `${filename || "script"}.yaml`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -21,6 +27,13 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ConvertResponse | null>(null);
+  const [editableYaml, setEditableYaml] = useState("");
+
+  useEffect(() => {
+    if (result?.yaml) {
+      setEditableYaml(result.yaml);
+    }
+  }, [result]);
 
   async function handleConvert() {
     if (!novelText.trim()) {
@@ -30,6 +43,7 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setEditableYaml("");
     try {
       const data = await convertNovel(novelText, titleHint || undefined);
       setResult(data);
@@ -39,6 +53,8 @@ export default function Home() {
       setLoading(false);
     }
   }
+
+  const isEdited = result != null && editableYaml !== result.yaml;
 
   return (
     <main style={styles.main}>
@@ -82,16 +98,34 @@ export default function Home() {
 
         <section style={styles.panel}>
           <div style={styles.previewHeader}>
-            <h2 style={styles.panelTitle}>YAML 预览</h2>
-            {result && (
-              <button
-                onClick={() =>
-                  downloadYaml(result.yaml, result.metadata.title)
-                }
-                style={styles.downloadBtn}
-              >
-                下载 .yaml
-              </button>
+            <div>
+              <h2 style={styles.panelTitle}>YAML 编辑</h2>
+              {result && (
+                <p style={styles.editHint}>
+                  可直接修改内容，下载时将保存当前编辑版本
+                  {isEdited && " · 已编辑"}
+                </p>
+              )}
+            </div>
+            {result && editableYaml && (
+              <div style={styles.previewActions}>
+                {isEdited && (
+                  <button
+                    onClick={() => setEditableYaml(result.yaml)}
+                    style={styles.resetBtn}
+                  >
+                    还原
+                  </button>
+                )}
+                <button
+                  onClick={() =>
+                    downloadYaml(editableYaml, result.metadata.title)
+                  }
+                  style={styles.downloadBtn}
+                >
+                  下载 .yaml
+                </button>
+              </div>
             )}
           </div>
 
@@ -103,7 +137,13 @@ export default function Home() {
                 <span>自动切分：{result.source_scenes} 场</span>
                 <span>角色：{result.character_count}</span>
               </div>
-              <pre style={styles.yamlPreview}>{result.yaml}</pre>
+              <textarea
+                value={editableYaml}
+                onChange={(e) => setEditableYaml(e.target.value)}
+                spellCheck={false}
+                style={styles.yamlEditor}
+                aria-label="YAML 剧本编辑器"
+              />
             </>
           ) : (
             <div style={styles.placeholder}>
@@ -177,7 +217,25 @@ const styles: Record<string, React.CSSProperties> = {
   previewHeader: {
     display: "flex",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
+    gap: 12,
+  },
+  previewActions: {
+    display: "flex",
+    gap: 8,
+    flexShrink: 0,
+  },
+  editHint: {
+    fontSize: 12,
+    color: "var(--text-muted)",
+    marginTop: 4,
+  },
+  resetBtn: {
+    background: "transparent",
+    color: "var(--text-muted)",
+    padding: "8px 14px",
+    fontSize: 13,
+    border: "1px solid var(--border)",
   },
   downloadBtn: {
     background: "var(--surface-hover)",
@@ -193,9 +251,10 @@ const styles: Record<string, React.CSSProperties> = {
     color: "var(--text-muted)",
     flexWrap: "wrap",
   },
-  yamlPreview: {
+  yamlEditor: {
     flex: 1,
     overflow: "auto",
+    resize: "vertical",
     background: "#12121a",
     border: "1px solid var(--border)",
     borderRadius: 8,
@@ -203,9 +262,11 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: "var(--font-mono)",
     fontSize: 13,
     lineHeight: 1.5,
-    whiteSpace: "pre-wrap",
+    whiteSpace: "pre",
     wordBreak: "break-word",
     minHeight: 360,
+    width: "100%",
+    color: "var(--text)",
   },
   placeholder: {
     flex: 1,
