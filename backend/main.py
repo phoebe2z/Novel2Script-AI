@@ -9,7 +9,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from converter import convert_novel_to_script
+from converter import convert_novel_to_script, stream_convert_events
+from fastapi.responses import StreamingResponse
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 load_dotenv(override=True)
@@ -52,6 +53,19 @@ class ConvertResponse(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/api/convert/stream")
+async def convert_stream(request: ConvertRequest):
+    return StreamingResponse(
+        stream_convert_events(request.novel_text, request.title_hint),
+        media_type="text/event-stream; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/convert", response_model=ConvertResponse)

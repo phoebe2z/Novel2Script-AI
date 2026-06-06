@@ -1,9 +1,12 @@
 """Novel-to-script conversion via LLM."""
 
+import json
 import os
 import re
 import time
+from collections.abc import Generator, Iterator
 from pathlib import Path
+from typing import Any
 
 import yaml
 from dotenv import load_dotenv
@@ -145,11 +148,20 @@ def _build_scene_prompt(
     return "\n\n".join(parts)
 
 
-def _call_llm(client: OpenAI, user_content: str) -> str:
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+def _handle_llm_error(exc: Exception) -> None:
+    message = str(exc)
+    if "413" in message or "Request too large" in message or "rate_limit" in message:
+        raise ValueError(
+            "单次请求超出 Groq token 上限。可在 .env 设置 CHUNK_MAX_CHARS=400 后重试，"
+            "或手动按场景分段粘贴。"
+        ) from exc
+    raise exc
 
+
+def _iter_llm_tokens(client: OpenAI, user_content: str) -> Iterator[str]:
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     try:
-        response = client.chat.completions.create(
+        stream = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -157,17 +169,20 @@ def _call_llm(client: OpenAI, user_content: str) -> str:
             ],
             temperature=0.05,
             max_tokens=int(os.getenv("OPENAI_MAX_TOKENS", "4096")),
+            stream=True,
         )
     except Exception as exc:
-        message = str(exc)
-        if "413" in message or "Request too large" in message or "rate_limit" in message:
-            raise ValueError(
-                "单次请求超出 Groq token 上限。可在 .env 设置 CHUNK_MAX_CHARS=400 后重试，"
-                "或手动按场景分段粘贴。"
-            ) from exc
-        raise
+        _handle_llm_error(exc)
+        return
 
-    return response.choices[0].message.content or ""
+    for chunk in stream:
+        token = chunk.choices[0].delta.content or ""
+        if token:
+            yield token
+
+
+def _call_llm(client: OpenAI, user_content: str) -> str:
+    return "".join(_iter_llm_tokens(client, user_content))
 
 
 def _convert_scene_part(
@@ -318,3 +333,142 @@ def convert_novel_to_script(
         sort_keys=False,
     )
     return script, yaml_str, len(segments)
+
+
+def _emit(event: dict[str, Any]) -> str:
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def stream_convert_events(
+    novel_text: str,
+    title_hint: str | None = None,
+) -> Generator[str, None, None]:
+    """SSE event stream: progress / token / complete / error."""
+    try:
+        if not novel_text.strip():
+            raise ValueError("请输入小说文本")
+
+        text = _normalize_text(novel_text)
+        client = _get_client()
+        segments = split_into_scenes(text)
+
+        yield _emit({"type": "start", "source_scenes": len(segments)})
+
+        scene_scripts: list[Script] = []
+        for index, segment in enumerate(segments):
+            if index > 0 and SCENE_DELAY_SEC > 0:
+                time.sleep(SCENE_DELAY_SEC)
+
+            yield _emit(
+                {
+                    "type": "progress",
+                    "message": f"场景 {index + 1}/{len(segments)}：{segment.hint}",
+                    "scene": index + 1,
+                    "total": len(segments),
+                }
+            )
+
+            parts = _split_long_text(segment.text, PART_MAX_CHARS)
+            part_scripts: list[Script] = []
+
+            for part_index, part_text in enumerate(parts, start=1):
+                if part_index > 1 and SCENE_DELAY_SEC > 0:
+                    time.sleep(SCENE_DELAY_SEC)
+
+                yield _emit(
+                    {
+                        "type": "progress",
+                        "message": (
+                            f"场景 {segment.index} · 第 {part_index}/{len(parts)} 部分生成中…"
+                        ),
+                    }
+                )
+
+                if part_index > 1 or (index > 0 and part_index == 1):
+                    yield _emit({"type": "token", "text": "\n\n"})
+
+                dialogue_checklist = _extract_dialogue_lines(part_text)
+                last_error: Exception | None = None
+                part_script: Script | None = None
+
+                for attempt in range(MAX_RETRIES + 1):
+                    strict_retry = attempt > 0
+                    user_prompt = _build_scene_prompt(
+                        segment,
+                        part_text,
+                        part_index=part_index,
+                        part_total=len(parts),
+                        title_hint=title_hint,
+                        dialogue_count=len(dialogue_checklist),
+                        strict_retry=strict_retry,
+                    )
+
+                    try:
+                        raw = ""
+                        for token in _iter_llm_tokens(client, user_prompt):
+                            raw += token
+                            yield _emit({"type": "token", "text": token})
+
+                        part_script = Script.model_validate(_parse_yaml(raw))
+                        coverage = _dialogue_coverage(dialogue_checklist, part_script)
+
+                        if coverage < COVERAGE_THRESHOLD and attempt < MAX_RETRIES:
+                            last_error = ValueError(
+                                f"场景 {segment.index} 第 {part_index} 部分对白覆盖不足"
+                            )
+                            yield _emit({"type": "progress", "message": "覆盖不足，正在重试…"})
+                            continue
+
+                        break
+                    except (yaml.YAMLError, ValidationError, ValueError) as exc:
+                        last_error = exc
+                        if attempt >= MAX_RETRIES:
+                            break
+                        yield _emit({"type": "progress", "message": "格式有误，正在重试…"})
+
+                if part_script is None:
+                    raise ValueError(
+                        f"场景 {segment.index}（{segment.hint}）第 {part_index} 部分转换失败："
+                        f"{last_error}"
+                    )
+
+                part_scripts.append(part_script)
+
+            scene_scripts.append(_merge_part_scripts(part_scripts))
+
+        title = _resolve_title(scene_scripts, title_hint)
+        script = _merge_all_scenes(scene_scripts, title)
+
+        expected_dialogues = _extract_dialogue_lines(text)
+        coverage = _dialogue_coverage(expected_dialogues, script)
+        if len(expected_dialogues) >= 5 and coverage < 0.75:
+            raise ValueError(
+                f"对白覆盖仍不足：输出 {_count_script_dialogues(script)} 句，"
+                f"原文约 {len(expected_dialogues)} 句（覆盖率 {coverage:.0%}）。"
+            )
+
+        yaml_str = yaml.dump(
+            script.model_dump(exclude_none=True),
+            allow_unicode=True,
+            default_flow_style=False,
+            sort_keys=False,
+        )
+
+        characters = {
+            d.character for scene in script.scenes for d in scene.dialogues
+        }
+
+        yield _emit(
+            {
+                "type": "complete",
+                "yaml": yaml_str,
+                "metadata": script.metadata.model_dump(),
+                "scene_count": len(script.scenes),
+                "character_count": len(characters),
+                "source_scenes": len(segments),
+            }
+        )
+    except ValueError as exc:
+        yield _emit({"type": "error", "detail": str(exc)})
+    except Exception as exc:
+        yield _emit({"type": "error", "detail": f"服务器错误：{exc}"})

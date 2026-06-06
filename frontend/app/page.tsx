@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { convertNovel, type ConvertResponse } from "@/lib/api";
+import { useRef, useState } from "react";
+import { convertNovelStream, type ConvertResponse } from "@/lib/api";
 
 function extractTitleFromYaml(yaml: string, fallback: string) {
   const match = yaml.match(/^\s*title:\s*["']?([^"'\n]+)["']?\s*$/m);
@@ -28,12 +28,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ConvertResponse | null>(null);
   const [editableYaml, setEditableYaml] = useState("");
-
-  useEffect(() => {
-    if (result?.yaml) {
-      setEditableYaml(result.yaml);
-    }
-  }, [result]);
+  const [progressMessage, setProgressMessage] = useState("");
+  const [streaming, setStreaming] = useState(false);
+  const yamlRef = useRef<HTMLTextAreaElement>(null);
 
   async function handleConvert() {
     if (!novelText.trim()) {
@@ -41,18 +38,39 @@ export default function Home() {
       return;
     }
     setLoading(true);
+    setStreaming(true);
     setError(null);
     setResult(null);
     setEditableYaml("");
+    setProgressMessage("连接 AI 服务…");
     try {
-      const data = await convertNovel(novelText, titleHint || undefined);
+      const data = await convertNovelStream(novelText, titleHint || undefined, {
+        onStart: (sourceScenes) =>
+          setProgressMessage(`已识别 ${sourceScenes} 个场景，开始生成…`),
+        onProgress: (message) => setProgressMessage(message),
+        onToken: (text) => {
+          setEditableYaml((prev) => {
+            const next = prev + text;
+            requestAnimationFrame(() => {
+              const el = yamlRef.current;
+              if (el) el.scrollTop = el.scrollHeight;
+            });
+            return next;
+          });
+        },
+      });
       setResult(data);
+      setEditableYaml(data.yaml);
+      setProgressMessage("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "转换失败");
     } finally {
       setLoading(false);
+      setStreaming(false);
     }
   }
+
+  const showEditor = streaming || result != null;
 
   const isEdited = result != null && editableYaml !== result.yaml;
 
@@ -91,7 +109,7 @@ export default function Home() {
             disabled={loading}
             style={styles.convertBtn}
           >
-            {loading ? "转换中..." : "转换为剧本"}
+            {loading ? progressMessage || "生成中…" : "转换为剧本"}
           </button>
           {error && <p style={styles.error}>{error}</p>}
         </section>
@@ -100,12 +118,14 @@ export default function Home() {
           <div style={styles.previewHeader}>
             <div>
               <h2 style={styles.panelTitle}>YAML 编辑</h2>
-              {result && (
+              {result ? (
                 <p style={styles.editHint}>
                   可直接修改内容，下载时将保存当前编辑版本
                   {isEdited && " · 已编辑"}
                 </p>
-              )}
+              ) : streaming ? (
+                <p style={styles.editHint}>{progressMessage}</p>
+              ) : null}
             </div>
             {result && editableYaml && (
               <div style={styles.previewActions}>
@@ -129,28 +149,35 @@ export default function Home() {
             )}
           </div>
 
-          {result ? (
+          {showEditor ? (
             <>
-              <div style={styles.stats}>
-                <span>标题：{result.metadata.title}</span>
-                <span>场景：{result.scene_count}</span>
-                <span>自动切分：{result.source_scenes} 场</span>
-                <span>角色：{result.character_count}</span>
-              </div>
+              {result && (
+                <div style={styles.stats}>
+                  <span>标题：{result.metadata.title}</span>
+                  <span>场景：{result.scene_count}</span>
+                  <span>自动切分：{result.source_scenes} 场</span>
+                  <span>角色：{result.character_count}</span>
+                </div>
+              )}
+              {streaming && !result && (
+                <div style={styles.streamingBadge}>流式生成中</div>
+              )}
               <textarea
+                ref={yamlRef}
                 value={editableYaml}
                 onChange={(e) => setEditableYaml(e.target.value)}
+                readOnly={streaming}
                 spellCheck={false}
-                style={styles.yamlEditor}
+                style={{
+                  ...styles.yamlEditor,
+                  ...(streaming ? styles.yamlEditorStreaming : {}),
+                }}
                 aria-label="YAML 剧本编辑器"
+                placeholder={streaming ? "等待 AI 输出…" : undefined}
               />
             </>
           ) : (
-            <div style={styles.placeholder}>
-              {loading
-                ? "AI 正在分析文本并拆分场景..."
-                : "转换结果将在此显示"}
-            </div>
+            <div style={styles.placeholder}>转换结果将在此实时显示</div>
           )}
         </section>
       </div>
@@ -267,6 +294,15 @@ const styles: Record<string, React.CSSProperties> = {
     minHeight: 360,
     width: "100%",
     color: "var(--text)",
+  },
+  yamlEditorStreaming: {
+    borderColor: "var(--accent)",
+    boxShadow: "0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent)",
+  },
+  streamingBadge: {
+    fontSize: 12,
+    color: "var(--accent)",
+    fontWeight: 500,
   },
   placeholder: {
     flex: 1,
