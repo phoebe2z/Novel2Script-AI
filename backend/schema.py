@@ -42,10 +42,15 @@ class Scene(BaseModel):
         elif isinstance(dialogues, dict):
             item["dialogues"] = [dialogues]
         elif isinstance(dialogues, list):
-            item["dialogues"] = [
-                d for d in dialogues
-                if d is not None and isinstance(d, dict) and d.get("character") and d.get("text")
-            ]
+            normalized: list[dict] = []
+            for entry in dialogues:
+                if isinstance(entry, str):
+                    text = entry.strip().strip('"\'\u201c\u201d')
+                    if text and len(text) <= 80:
+                        normalized.append({"character": "未知", "text": text})
+                elif isinstance(entry, dict) and entry.get("character") and entry.get("text"):
+                    normalized.append(entry)
+            item["dialogues"] = normalized
 
         if item.get("action") is None:
             item["action"] = ""

@@ -48,15 +48,8 @@ export default function Home() {
         onStart: (sourceScenes) =>
           setProgressMessage(`已识别 ${sourceScenes} 个场景，开始生成…`),
         onProgress: (message) => setProgressMessage(message),
-        onToken: (text) => {
-          setEditableYaml((prev) => {
-            const next = prev + text;
-            requestAnimationFrame(() => {
-              const el = yamlRef.current;
-              if (el) el.scrollTop = el.scrollHeight;
-            });
-            return next;
-          });
+        onToken: () => {
+          /* 不展示 LLM 原始 token，完成后一次性写入后处理 YAML */
         },
       });
       setResult(data);
@@ -163,7 +156,9 @@ export default function Home() {
                 </div>
               )}
               {streaming && !result && (
-                <div style={styles.streamingBadge}>流式生成中</div>
+                <div style={styles.streamingBadge}>
+                  {progressMessage || "生成中…"}
+                </div>
               )}
               <textarea
                 ref={yamlRef}
