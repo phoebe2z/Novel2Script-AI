@@ -85,10 +85,10 @@ export default function Home() {
         <section style={styles.panel}>
           <h2 style={styles.panelTitle}>输入</h2>
           <label style={styles.label}>
-            标题提示（可选）
+            标题提示（可选，不填则 AI 自动识别作品名）
             <input
               type="text"
-              placeholder="例如：三体第一章"
+              placeholder="留空自动识别，如：三体"
               value={titleHint}
               onChange={(e) => setTitleHint(e.target.value)}
               style={{ marginTop: 6 }}
@@ -154,6 +154,9 @@ export default function Home() {
               {result && (
                 <div style={styles.stats}>
                   <span>标题：{result.metadata.title}</span>
+                  {result.metadata.author && (
+                    <span>作者：{result.metadata.author}</span>
+                  )}
                   <span>场景：{result.scene_count}</span>
                   <span>自动切分：{result.source_scenes} 场</span>
                   <span>角色：{result.character_count}</span>

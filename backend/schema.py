@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Metadata(BaseModel):
@@ -22,11 +22,38 @@ class Dialogue(BaseModel):
 
 
 class Scene(BaseModel):
-    id: int = Field(..., description="场景编号")
+    id: int = Field(default=1, description="场景编号（系统最终会重新编号）")
     slug: str = Field(..., description="场景标头，如 INT. 书房 - 日")
-    action: str = Field(..., description="镜头动作与环境描写")
+    action: str = Field(default="", description="镜头动作与环境描写")
     dialogues: list[Dialogue] = Field(default_factory=list)
     notes: str | None = Field(default=None, description="拍摄提示/转场说明")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_scene_data(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+
+        item = dict(data)
+        dialogues = item.get("dialogues")
+
+        if dialogues is None or dialogues == "null":
+            item["dialogues"] = []
+        elif isinstance(dialogues, dict):
+            item["dialogues"] = [dialogues]
+        elif isinstance(dialogues, list):
+            item["dialogues"] = [
+                d for d in dialogues
+                if d is not None and isinstance(d, dict) and d.get("character") and d.get("text")
+            ]
+
+        if item.get("action") is None:
+            item["action"] = ""
+
+        if item.get("id") is None:
+            item["id"] = 1
+
+        return item
 
 
 class Script(BaseModel):

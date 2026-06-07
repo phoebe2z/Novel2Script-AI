@@ -118,6 +118,101 @@ def _dialogue_coverage(expected: list[str], script: Script) -> float:
     return found / len(expected)
 
 
+def _parse_scenes_from_llm(raw: str) -> list[Scene]:
+    """Parse LLM output; accepts full script or scenes-only YAML."""
+    data = _parse_yaml(raw)
+    scenes_data = data.get("scenes")
+
+    if scenes_data is None:
+        raise ValueError("AI 输出缺少 scenes 列表")
+
+    if isinstance(scenes_data, dict):
+        scenes_data = [scenes_data]
+    elif not isinstance(scenes_data, list):
+        raise ValueError("scenes 必须是列表")
+
+    return [Scene.model_validate(item) for item in scenes_data]
+
+
+def _merge_scenes_into_one(scenes: list[Scene]) -> Scene:
+    """将同一场戏的多段输出合并为一个 Scene。"""
+    if not scenes:
+        raise ValueError("无有效场景输出")
+    if len(scenes) == 1:
+        return scenes[0]
+
+    first = scenes[0]
+    actions = [s.action for s in scenes if s.action]
+    notes = [s.notes for s in scenes if s.notes]
+    dialogues: list = []
+    for scene in scenes:
+        dialogues.extend(scene.dialogues)
+
+    return Scene(
+        id=1,
+        slug=first.slug,
+        action="\n".join(actions),
+        dialogues=dialogues,
+        notes="\n".join(notes) if notes else None,
+    )
+
+
+def _infer_work_metadata(
+    client: OpenAI,
+    novel_text: str,
+    title_hint: str | None,
+) -> Metadata:
+    """Identify source work title and author from novel excerpt."""
+    if title_hint:
+        return Metadata(title=title_hint, author="佚名", version="2.0")
+
+    excerpt = novel_text[:1500]
+    prompt = f"""阅读以下小说摘录，识别出处作品信息。
+要求：
+- title：作品名称（如「三体」），不要写「场景1」「开场」等场景标签
+- author：作者姓名；无法确定则写「佚名」
+- 只输出 JSON，不要其他文字：{{"title": "...", "author": "..."}}
+
+摘录：
+{excerpt}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=120,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        content = _strip_code_fence(content)
+        if content.startswith("{"):
+            info = json.loads(content)
+            title = str(info.get("title", "")).strip() or "未命名"
+            author = str(info.get("author", "")).strip() or "佚名"
+            if re.match(r"^场景\s*\d", title) or title in {"开场", "未命名"}:
+                title = _fallback_title_from_text(novel_text)
+            return Metadata(title=title, author=author, version="2.0")
+    except Exception:
+        pass
+
+    return Metadata(title=_fallback_title_from_text(novel_text), author="佚名", version="2.0")
+
+
+def _fallback_title_from_text(text: str) -> str:
+    """Heuristic fallback when LLM inference fails."""
+    known = [
+        ("汪淼", "三体"),
+        ("罗辑", "三体"),
+        ("哈利", "哈利·波特"),
+        ("贾宝玉", "红楼梦"),
+        ("孙悟空", "西游记"),
+    ]
+    for keyword, title in known:
+        if keyword in text:
+            return title
+    return "未命名"
+
+
 def _build_scene_prompt(
     segment: SceneSegment,
     part_text: str,
@@ -131,10 +226,13 @@ def _build_scene_prompt(
     parts = [
         f"【场景 {segment.index}：{segment.hint}】",
         f"【本场第 {part_index}/{part_total} 部分，同一场戏请保持 slug 一致】",
+        "【只输出 scenes 列表（以 scenes: 开头），不要输出 metadata】",
+        "【只输出 1 个 scene 对象；id 固定写 1（系统会重新编号）】",
+        "【dialogues 必须是列表 []，禁止 null；无对白时写 dialogues: []】",
     ]
 
     if title_hint and segment.index == 1 and part_index == 1:
-        parts.append(f"标题提示：{title_hint}")
+        parts.append(f"出处作品提示：{title_hint}（metadata 由系统写入，此处勿生成 title）")
 
     if dialogue_count:
         parts.append(
@@ -211,7 +309,8 @@ def _convert_scene_part(
 
         try:
             raw = _call_llm(client, user_prompt)
-            script = Script.model_validate(_parse_yaml(raw))
+            scenes = _parse_scenes_from_llm(raw)
+            script = Script(metadata=Metadata(title="tmp", version="2.0"), scenes=scenes)
             coverage = _dialogue_coverage(dialogue_checklist, script)
 
             if coverage < COVERAGE_THRESHOLD and attempt < MAX_RETRIES:
@@ -236,7 +335,7 @@ def _convert_scene(
     client: OpenAI,
     segment: SceneSegment,
     title_hint: str | None,
-) -> Script:
+) -> list[Scene]:
     parts = _split_long_text(segment.text, PART_MAX_CHARS)
     part_scripts: list[Script] = []
 
@@ -257,41 +356,24 @@ def _convert_scene(
     return _merge_part_scripts(part_scripts)
 
 
-def _merge_part_scripts(scripts: list[Script]) -> Script:
-    """将同一场戏的多部分输出合并为一个 Script。"""
+def _merge_part_scripts(scripts: list[Script]) -> list[Scene]:
+    """将同一场戏的多部分输出合并为一个 Scene。"""
     if not scripts:
         raise ValueError("无有效场景输出")
 
-    title = scripts[0].metadata.title
     scenes: list[Scene] = []
     for script in scripts:
         scenes.extend(script.scenes)
 
-    return Script(
-        metadata=Metadata(title=title, version="2.0"),
-        scenes=scenes,
-    )
+    return [_merge_scenes_into_one(scenes)]
 
 
-def _merge_all_scenes(scene_scripts: list[Script], title: str) -> Script:
+def _merge_all_scenes(scenes: list[Scene], metadata: Metadata) -> Script:
     merged_scenes: list[Scene] = []
-    scene_id = 1
+    for scene_id, scene in enumerate(scenes, start=1):
+        merged_scenes.append(scene.model_copy(update={"id": scene_id}))
 
-    for script in scene_scripts:
-        for scene in script.scenes:
-            merged_scenes.append(scene.model_copy(update={"id": scene_id}))
-            scene_id += 1
-
-    return Script(metadata=Metadata(title=title, version="2.0"), scenes=merged_scenes)
-
-
-def _resolve_title(scene_scripts: list[Script], title_hint: str | None) -> str:
-    if title_hint:
-        return title_hint
-    for script in scene_scripts:
-        if script.metadata.title:
-            return script.metadata.title
-    return "未命名"
+    return Script(metadata=metadata, scenes=merged_scenes)
 
 
 def convert_novel_to_script(
@@ -306,16 +388,16 @@ def convert_novel_to_script(
 
     text = _normalize_text(novel_text)
     client = _get_client()
+    metadata = _infer_work_metadata(client, text, title_hint)
     segments = split_into_scenes(text)
 
-    scene_scripts: list[Script] = []
+    all_scenes: list[Scene] = []
     for index, segment in enumerate(segments):
         if index > 0 and SCENE_DELAY_SEC > 0:
             time.sleep(SCENE_DELAY_SEC)
-        scene_scripts.append(_convert_scene(client, segment, title_hint))
+        all_scenes.extend(_convert_scene(client, segment, title_hint))
 
-    title = _resolve_title(scene_scripts, title_hint)
-    script = _merge_all_scenes(scene_scripts, title)
+    script = _merge_all_scenes(all_scenes, metadata)
 
     expected_dialogues = _extract_dialogue_lines(text)
     coverage = _dialogue_coverage(expected_dialogues, script)
@@ -350,11 +432,27 @@ def stream_convert_events(
 
         text = _normalize_text(novel_text)
         client = _get_client()
+
+        yield _emit({"type": "progress", "message": "正在识别作品出处…"})
+        metadata = _infer_work_metadata(client, text, title_hint)
         segments = split_into_scenes(text)
 
-        yield _emit({"type": "start", "source_scenes": len(segments)})
+        yield _emit(
+            {
+                "type": "start",
+                "source_scenes": len(segments),
+                "title": metadata.title,
+                "author": metadata.author,
+            }
+        )
+        yield _emit(
+            {
+                "type": "progress",
+                "message": f"作品：{metadata.title} · 作者：{metadata.author}",
+            }
+        )
 
-        scene_scripts: list[Script] = []
+        all_scenes: list[Scene] = []
         for index, segment in enumerate(segments):
             if index > 0 and SCENE_DELAY_SEC > 0:
                 time.sleep(SCENE_DELAY_SEC)
@@ -409,7 +507,10 @@ def stream_convert_events(
                             raw += token
                             yield _emit({"type": "token", "text": token})
 
-                        part_script = Script.model_validate(_parse_yaml(raw))
+                        part_script = Script(
+                            metadata=Metadata(title="tmp", version="2.0"),
+                            scenes=_parse_scenes_from_llm(raw),
+                        )
                         coverage = _dialogue_coverage(dialogue_checklist, part_script)
 
                         if coverage < COVERAGE_THRESHOLD and attempt < MAX_RETRIES:
@@ -434,10 +535,9 @@ def stream_convert_events(
 
                 part_scripts.append(part_script)
 
-            scene_scripts.append(_merge_part_scripts(part_scripts))
+            all_scenes.extend(_merge_part_scripts(part_scripts))
 
-        title = _resolve_title(scene_scripts, title_hint)
-        script = _merge_all_scenes(scene_scripts, title)
+        script = _merge_all_scenes(all_scenes, metadata)
 
         expected_dialogues = _extract_dialogue_lines(text)
         coverage = _dialogue_coverage(expected_dialogues, script)
