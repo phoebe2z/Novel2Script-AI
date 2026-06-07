@@ -66,7 +66,7 @@ _SPEAKER_ALIASES: dict[str, str] = {
     "同事": "同事军官",
 }
 
-# 对白内容 → 说话人（三体第一章高频，兜底用）
+# Dialogue content → speaker (The Three-Body Problem ch.1 fallback rules)
 _CONTENT_SPEAKER_RULES: list[tuple[str, str]] = [
     (r"请不要在我家里", "汪淼"),
     (r"^哦[,，]?对不起", "年轻警官"),
@@ -208,7 +208,7 @@ _BARE_DIALOGUE_ITEM = re.compile(r"^(\s*)-\s+(.+)$")
 
 
 def _repair_dialogues_section(yaml_text: str) -> str:
-    """把 dialogues 下的 - \"台词\" 字符串项改为标准对象。"""
+    """Convert bare `- "line"` strings under dialogues into standard objects."""
     lines = yaml_text.splitlines()
     out: list[str] = []
     in_dialogues = False
@@ -231,12 +231,12 @@ def _repair_dialogues_section(yaml_text: str) -> str:
             match = _BARE_DIALOGUE_ITEM.match(line)
             if match and "character:" not in line and "text:" not in line:
                 prefix, value = match.group(1), match.group(2).strip()
-                # 已是对象子字段则跳过
+                # Already an object sub-field — skip
                 if re.match(r"^\w+:", value):
                     out.append(line)
                     continue
                 content = _extract_scalar_content(value)
-                # 过长或像叙述的句子 → 跳过（应出现在 action 里）
+                # Long or narrative-like line — skip (belongs in action)
                 if len(content) > 80 or (
                     len(content) > 20 and not content.endswith(("?", "？", "!", "！", "…", "。"))
                 ):
@@ -444,7 +444,7 @@ def _dialogue_matches_source(text: str, source_text: str) -> bool:
 
 
 def _build_dialogue_speaker_map(text: str) -> dict[str, str]:
-    """从小说原文推断「对白文本 → 说话人」。"""
+    """Build dialogue text → speaker mapping from source novel."""
     mapping: dict[str, str] = {}
 
     for match in re.finditer(rf"{_QUOTE_OPEN}({_QUOTE_CONTENT}){_QUOTE_CLOSE}", text):
@@ -523,7 +523,7 @@ def _is_narrative_dialogue(text: str, source_text: str = "") -> bool:
 
 
 def _infer_speaker_from_context(line: str, source_text: str) -> str:
-    """根据原文引号位置与对白内容推断说话人。"""
+    """Infer speaker from quote position and dialogue content in source text."""
     speaker_map = _build_dialogue_speaker_map(source_text)
     norm = _normalize_line(line)
     if norm in speaker_map:
@@ -552,7 +552,7 @@ def _fix_vocative_character(
     source_text: str,
     speaker_map: dict[str, str],
 ) -> str:
-    """修正「汪淼？」被误标为汪淼说的情况。"""
+    """Fix vocative lines (e.g. 「汪淼？」) mislabeled as spoken by the named person."""
     inferred = speaker_map.get(_normalize_line(dialogue_text))
     if inferred:
         return inferred
@@ -607,7 +607,7 @@ def _dialogue_in_action(action: str, line: str) -> bool:
 
 
 def _remove_dialogue_from_action(action: str, line: str) -> str:
-    """从 action 中移除已回收的对白文本。"""
+    """Remove recovered dialogue lines from action text."""
     norm_line = _normalize_line(line)
     paragraphs = re.split(r"\n\s*\n", action.strip())
     kept: list[str] = []
@@ -619,7 +619,7 @@ def _remove_dialogue_from_action(action: str, line: str) -> str:
             continue
         if norm_line in _normalize_line(stripped) and len(stripped) <= len(line) + 20:
             continue
-        # 去掉引号包裹的同一对白
+        # Strip quoted variant of the same dialogue line
         unquoted = re.sub(
             rf'^[{_QUOTE_CHARS}]|[{_QUOTE_CHARS}]$',
             "",
@@ -632,7 +632,7 @@ def _remove_dialogue_from_action(action: str, line: str) -> str:
 
 
 def _recover_dialogues_from_action(scene: Scene, source_text: str) -> Scene:
-    """把 action 里遗漏的原文引号对白回收进 dialogues。"""
+    """Recover quoted lines left in action into dialogues."""
     expected = _extract_dialogue_lines(source_text)
     if not expected:
         return scene
@@ -683,7 +683,7 @@ def _order_dialogues_by_source(dialogues: list[Dialogue], source_text: str) -> l
 
 
 def _supplement_missing_dialogues(scene: Scene, source_text: str) -> Scene:
-    """用原文引号对白补齐 LLM 遗漏项（带说话人推断，非待标注）。"""
+    """Supplement missing dialogues from source quotes with speaker inference."""
     expected = _extract_dialogue_lines(source_text)
     if not expected:
         return scene
@@ -718,7 +718,7 @@ def _finalize_scene_dialogues(scene: Scene, source_text: str) -> Scene:
 
 
 def _clean_scene(scene: Scene, source_text: str) -> Scene:
-    """过滤叙述性假对白、修正泛称角色、去重。"""
+    """Drop narrative faux-dialogues, fix generic names, and dedupe."""
     speaker_map = _build_dialogue_speaker_map(source_text)
     kept: list[Dialogue] = []
     moved_to_action: list[str] = []
@@ -754,7 +754,7 @@ def _clean_scene(scene: Scene, source_text: str) -> Scene:
 
 
 def _normalize_scene_dialogues(scene: Scene, source_text: str) -> Scene:
-    """对齐已有对白顺序，并用原文推断 character（不插入新对白）。"""
+    """Align dialogues to source order and infer characters (no new lines inserted)."""
     expected = _extract_dialogue_lines(source_text)
     if not expected and not scene.dialogues:
         return scene
@@ -890,7 +890,7 @@ def _parse_scenes_from_llm(raw: str, source_text: str = "") -> list[Scene]:
 
 
 def _merge_scenes_into_one(scenes: list[Scene]) -> Scene:
-    """将同一场戏的多段输出合并为一个 Scene。"""
+    """Merge multi-part LLM output for one scene into a single Scene."""
     if not scenes:
         raise ValueError("无有效场景输出")
     if len(scenes) == 1:
@@ -1196,7 +1196,7 @@ def _merge_part_scripts(
     source_text: str = "",
     segment: SceneSegment | None = None,
 ) -> list[Scene]:
-    """将同一场戏的多部分输出合并为一个 Scene。"""
+    """Merge multi-part script chunks for one scene into a single Scene."""
     if not scripts:
         raise ValueError("无有效场景输出")
 
@@ -1226,7 +1226,7 @@ def convert_novel_to_script(
     title_hint: str | None = None,
 ) -> tuple[Script, str, int]:
     """
-    先按场景切分原文，再逐场景生成剧本，最后合并。
+    Split novel by scene, convert each segment via LLM, then merge.
     """
     if not novel_text.strip():
         raise ValueError("请输入小说文本")

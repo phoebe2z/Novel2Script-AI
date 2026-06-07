@@ -23,7 +23,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Novel2Script AI",
-    description="小说转剧本助手 API",
+    description="Novel-to-script conversion API",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -38,8 +38,8 @@ app.add_middleware(
 
 
 class ConvertRequest(BaseModel):
-    novel_text: str = Field(..., min_length=1, description="小说章节文本")
-    title_hint: str | None = Field(default=None, description="可选标题提示")
+    novel_text: str = Field(..., min_length=1, description="Novel excerpt text")
+    title_hint: str | None = Field(default=None, description="Optional work title hint")
 
 
 class ConvertResponse(BaseModel):

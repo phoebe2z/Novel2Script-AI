@@ -49,7 +49,7 @@ export default function Home() {
           setProgressMessage(`已识别 ${sourceScenes} 个场景，开始生成…`),
         onProgress: (message) => setProgressMessage(message),
         onToken: () => {
-          /* 不展示 LLM 原始 token，完成后一次性写入后处理 YAML */
+          /* Do not stream raw LLM tokens; write post-processed YAML on complete */
         },
       });
       setResult(data);

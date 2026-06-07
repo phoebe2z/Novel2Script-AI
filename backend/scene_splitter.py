@@ -4,7 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 
-# 转场切分点：按叙事顺序排列，越靠前优先级越高
+# Scene break patterns (ordered by narrative priority)
 _SCENE_BREAK_PATTERNS: list[tuple[str, str]] = [
     (r"在楼道里说|就在楼道里说", "汪淼家-楼道"),
     (r"向屋里闯|请不要在我家里抽烟", "汪淼家-冲突"),
@@ -50,7 +50,7 @@ class SceneSegment:
 
 
 def slug_for_segment(hint: str, text: str) -> str:
-    """优先按切分 hint 定 slug，避免被对白里的地名误导。"""
+    """Derive slug from segment hint first; ignore place names appearing only in dialogue."""
     if re.search(r"大厅|会议|常伟思|讲台|北约|中情局", text):
         return "INT. 作战中心会议室 - 日"
     if re.search(r"良湘|超导线圈|加速器", text):
@@ -94,7 +94,7 @@ def _find_break_positions(text: str) -> list[tuple[int, str]]:
 
 
 def _merge_tiny_fragments(segments: list[SceneSegment]) -> list[SceneSegment]:
-    """仅合并极短碎片（<60字）到前一场，不同 hint 不合并。"""
+    """Merge only tiny fragments (<60 chars) with the same hint into the previous segment."""
     if len(segments) <= 1:
         return segments
 
@@ -116,7 +116,7 @@ def _merge_tiny_fragments(segments: list[SceneSegment]) -> list[SceneSegment]:
 
 
 def _subdivide_oversized(segments: list[SceneSegment]) -> list[SceneSegment]:
-    """超长片段按句号再切，保留原 hint。"""
+    """Subdivide oversized segments at sentence boundaries while keeping the hint."""
     result: list[SceneSegment] = []
     for segment in segments:
         if len(segment.text) <= _MAX_SEGMENT_CHARS:
@@ -144,7 +144,7 @@ def _subdivide_oversized(segments: list[SceneSegment]) -> list[SceneSegment]:
 
 
 def split_into_scenes(text: str) -> list[SceneSegment]:
-    """将小说文本按叙事场景切分。"""
+    """Split novel text into scene segments."""
     text = text.strip()
     if not text:
         return []
