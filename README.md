@@ -2,10 +2,6 @@
 
 将中文小说文本自动转换为结构化 YAML 剧本（Schema v2），降低文学语言到镜头语言的改编门槛。
 
-## Demo 演示视频
-
-[Novel2Script_demo.mp4](https://drive.google.com/file/d/1wtM9h6pzVjkvZ_Vo940YNs6E7TPGKiUy/view?usp=sharing)（Google Drive）
-
 ## 功能
 
 - **文本输入**：粘贴多章节小说文本，可选作品名提示
